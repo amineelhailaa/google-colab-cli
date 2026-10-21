@@ -1,6 +1,6 @@
 ---
 log:
-2026-10-21: Migrated OAuth2 token persistence in `auth.py` from `~/.config/colab-cli/token.json` to the OS native password storage via the `keyring` library (`KEYRING_SERVICE_NAME = "google-colab-cli"`, `KEYRING_USERNAME = "oauth_token"`). When the keyring is empty, locked, or inaccessible, `_run_remote_flow` is invoked and any failure to write back to the keyring is logged as a warning without failing the command.
+2026-10-21: Migrated OAuth2 token persistence in `auth.py` from `~/.config/colab-cli/token.json` to the OS native password storage via the `keyring` library (`KEYRING_SERVICE_NAME = "google-colab-cli"`, `KEYRING_USERNAME = "oauth_token"`). When the keyring is empty, locked, or inaccessible, `_run_remote_flow` is invoked; keyring read/write failures print a warning to stderr without failing the command. An existing `~/.config/colab-cli/token.json` (`LEGACY_TOKEN_PATH`) is used when the keyring has no token, copied into the keyring, and deleted only after the keyring write succeeds; it is also deleted when the keyring already holds a token.
 2026-09-25: Cleaned up references to keep-alive background daemon and pre-flight pings. VM liveness is automatically maintained by the Colab backend based on active kernel activity.
 2026-08-10: Added `colab usage` for account-level compute-unit rate/balance via `GET /tun/m/ccu-info` on the session backend (same bearer token as `colab new`).
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
@@ -36,7 +36,12 @@ backend, selected via the global `--auth=<provider>` flag:
     prompt. The refresh token is cached in the OS native keyring via the
     `keyring` library (`service_name="google-colab-cli"`, `username="oauth_token"`),
     falling back to running `_run_remote_flow` if the keyring is not accessible
-    or locked.
+    or locked. Keyring read/write failures are printed to stderr, since a
+    failed write means the user is prompted again on every command. A token
+    left at the pre-keyring path `~/.config/colab-cli/token.json` is migrated
+    into the keyring on first use and the file is deleted once the keyring
+    write succeeds (it is kept if the write fails). If the keyring already
+    holds a token, the legacy file is deleted.
     This is the same mechanism `gcloud auth application-default login` uses,
     and it behaves identically on local, remote, headless, and container
     hosts (no auto-opened browser, no bound port). We deliberately do **not**
