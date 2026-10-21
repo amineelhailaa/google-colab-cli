@@ -20,6 +20,7 @@ import pytest
 from colab_cli.auth import (
     KEYRING_SERVICE_NAME,
     KEYRING_USERNAME,
+    LEGACY_TOKEN_PATH,
     PUBLIC_SCOPES,
     REMOTE_REDIRECT_URI,
     AuthProvider,
@@ -264,6 +265,165 @@ def test_get_credentials_keyring_timeout_falls_back_to_remote_flow(mock_deps, mo
     mock_flow.fetch_token.assert_called_once_with(code="pasted-code")
     mock_deps["session"].assert_called_once_with(mock_creds_new)
     assert res == mock_deps["session"].return_value
+
+
+def _setup_remote_flow(mock_deps, mocker):
+    mock_flow = MagicMock()
+    mock_creds_new = MagicMock()
+    mock_creds_new.to_json.return_value = '{"token":"new"}'
+    mock_flow.authorization_url.return_value = ("https://auth.example/url", "state")
+    mock_flow.credentials = mock_creds_new
+    mock_deps["flow_cls"].from_client_config.return_value = mock_flow
+    mocker.patch("colab_cli.auth.input", create=True, return_value="pasted-code")
+    return mock_flow, mock_creds_new
+
+
+def test_keyring_read_failure_warns_on_stderr(mock_deps, mocker, capsys):
+    mock_deps["exists"].side_effect = lambda path: path == "dummy_config.json"
+    mock_deps["keyring"].get_password.side_effect = KeyringError("locked")
+    _setup_remote_flow(mock_deps, mocker)
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    err = capsys.readouterr().err
+    assert "Could not read the OAuth token from the OS keyring" in err
+    assert "locked" in err
+
+
+def test_keyring_save_failure_warns_on_stderr(mock_deps, mocker, capsys):
+    mock_deps["exists"].side_effect = lambda path: path == "dummy_config.json"
+    mock_deps["keyring"].set_password.side_effect = KeyringError("no backend")
+    _setup_remote_flow(mock_deps, mocker)
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    err = capsys.readouterr().err
+    assert "Could not save the OAuth token to the OS keyring" in err
+    assert "no backend" in err
+    assert "--auth=adc" in err
+
+
+def test_legacy_token_file_migrated_to_keyring(mock_deps, mocker):
+    """A pre-keyring token.json is used, copied into the keyring, then deleted."""
+    mock_deps["exists"].side_effect = lambda path: path in (
+        "dummy_config.json",
+        LEGACY_TOKEN_PATH,
+    )
+    m_remove = mocker.patch("colab_cli.auth.os.remove")
+
+    legacy_creds = MagicMock()
+    legacy_creds.valid = True
+    legacy_creds.to_json.return_value = '{"token":"legacy"}'
+    mock_deps["creds_cls"].from_authorized_user_file.return_value = legacy_creds
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        res = get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    mock_deps["creds_cls"].from_authorized_user_file.assert_called_once_with(
+        LEGACY_TOKEN_PATH, PUBLIC_SCOPES
+    )
+    mock_deps["flow_cls"].from_client_config.assert_not_called()
+    mock_deps["keyring"].set_password.assert_called_once_with(
+        KEYRING_SERVICE_NAME, KEYRING_USERNAME, '{"token":"legacy"}'
+    )
+    m_remove.assert_called_once_with(LEGACY_TOKEN_PATH)
+    mock_deps["session"].assert_called_once_with(legacy_creds)
+    assert res == mock_deps["session"].return_value
+
+
+def test_legacy_token_file_kept_when_keyring_save_fails(mock_deps, mocker):
+    """Never delete the legacy token unless it was persisted to the keyring."""
+    mock_deps["exists"].side_effect = lambda path: path in (
+        "dummy_config.json",
+        LEGACY_TOKEN_PATH,
+    )
+    mock_deps["keyring"].get_password.side_effect = KeyringError("locked")
+    mock_deps["keyring"].set_password.side_effect = KeyringError("locked")
+    m_remove = mocker.patch("colab_cli.auth.os.remove")
+
+    legacy_creds = MagicMock()
+    legacy_creds.valid = True
+    legacy_creds.to_json.return_value = '{"token":"legacy"}'
+    mock_deps["creds_cls"].from_authorized_user_file.return_value = legacy_creds
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    mock_deps["flow_cls"].from_client_config.assert_not_called()
+    m_remove.assert_not_called()
+    mock_deps["session"].assert_called_once_with(legacy_creds)
+
+
+def test_legacy_token_file_deleted_when_keyring_has_token(mock_deps, mocker):
+    mock_deps["exists"].side_effect = lambda path: path in (
+        "dummy_config.json",
+        LEGACY_TOKEN_PATH,
+    )
+    m_remove = mocker.patch("colab_cli.auth.os.remove")
+    mock_deps["keyring"].get_password.return_value = '{"token": "valid"}'
+    mock_creds = MagicMock()
+    mock_creds.valid = True
+    mock_deps["creds_cls"].from_authorized_user_info.return_value = mock_creds
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    mock_deps["creds_cls"].from_authorized_user_file.assert_not_called()
+    mock_deps["keyring"].set_password.assert_not_called()
+    m_remove.assert_called_once_with(LEGACY_TOKEN_PATH)
+    mock_deps["session"].assert_called_once_with(mock_creds)
+
+
+def test_corrupt_legacy_token_file_falls_back_to_remote_flow(mock_deps, mocker):
+    """A corrupt legacy token is deleted right away, then the remote flow runs."""
+    files = {"dummy_config.json", LEGACY_TOKEN_PATH}
+    mock_deps["exists"].side_effect = lambda path: path in files
+    m_remove = mocker.patch(
+        "colab_cli.auth.os.remove", side_effect=lambda path: files.discard(path)
+    )
+    mock_deps["creds_cls"].from_authorized_user_file.side_effect = ValueError("bad")
+    mock_flow, mock_creds_new = _setup_remote_flow(mock_deps, mocker)
+
+    legacy_present_at_prompt = []
+    mocker.patch(
+        "colab_cli.auth.input",
+        create=True,
+        side_effect=lambda _: legacy_present_at_prompt.append(
+            LEGACY_TOKEN_PATH in files
+        )
+        or "pasted-code",
+    )
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    assert legacy_present_at_prompt == [False]
+    m_remove.assert_called_once_with(LEGACY_TOKEN_PATH)
+    mock_flow.fetch_token.assert_called_once_with(code="pasted-code")
+    mock_deps["keyring"].set_password.assert_called_once_with(
+        KEYRING_SERVICE_NAME, KEYRING_USERNAME, '{"token":"new"}'
+    )
+
+
+def test_corrupt_legacy_token_file_deleted_even_if_keyring_save_fails(
+    mock_deps, mocker
+):
+    """The corrupt file holds nothing worth keeping, unlike a valid legacy token."""
+    mock_deps["exists"].side_effect = lambda path: path in (
+        "dummy_config.json",
+        LEGACY_TOKEN_PATH,
+    )
+    mock_deps["keyring"].set_password.side_effect = KeyringError("locked")
+    m_remove = mocker.patch("colab_cli.auth.os.remove")
+    mock_deps["creds_cls"].from_authorized_user_file.side_effect = ValueError("bad")
+    _setup_remote_flow(mock_deps, mocker)
+
+    with patch("builtins.open", mock_open(read_data='{"web":{"client_id":"id"}}')):
+        get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
+
+    m_remove.assert_called_once_with(LEGACY_TOKEN_PATH)
 
 
 def test_run_with_timeout_infers_operation_name():

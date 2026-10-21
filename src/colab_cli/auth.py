@@ -57,6 +57,10 @@ KEYRING_SERVICE_NAME = "google-colab-cli"
 KEYRING_USERNAME = "oauth_token"
 KEYRING_TIMEOUT_SECONDS = 30.0
 
+# Plaintext token location used before tokens moved to the keyring. Read once
+# to migrate existing users, then deleted after a successful keyring write.
+LEGACY_TOKEN_PATH = os.path.expanduser("~/.config/colab-cli/token.json")
+
 
 def _run_with_timeout(func, *args, timeout: float):
     """Run a blocking callable in a daemon thread and raise TimeoutError if it hangs."""
@@ -163,6 +167,7 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
         )
 
     creds = None
+    needs_save = False
 
     try:
         token_json = _get_token_from_keyring()
@@ -170,8 +175,25 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
             creds = Credentials.from_authorized_user_info(
                 json.loads(token_json), PUBLIC_SCOPES
             )
+            _remove_legacy_token()
     except Exception as e:
         logger.warning(f"Failed to load token from keyring: {e}")
+        # Each command is a separate process, so without this the user would be
+        # re-prompted on every run with no visible reason.
+        typer.echo(
+            f"Warning: Could not read the OAuth token from the OS keyring ({e}).",
+            err=True,
+        )
+
+    if not creds and os.path.exists(LEGACY_TOKEN_PATH):
+        try:
+            creds = Credentials.from_authorized_user_file(
+                LEGACY_TOKEN_PATH, PUBLIC_SCOPES
+            )
+            needs_save = True
+        except Exception as e:
+            logger.warning(f"Failed to load legacy token from {LEGACY_TOKEN_PATH}: {e}")
+            _remove_legacy_token()
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -183,14 +205,35 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
 
         if not creds:
             creds = _run_remote_flow(client_config)
+        needs_save = True
 
-        # Save the credentials for the next run
+    if needs_save:
         try:
             _save_token_to_keyring(creds.to_json())
         except Exception as e:
             logger.warning(f"Failed to save token to keyring: {e}")
+            # Each command is a separate process, so without this the user would be
+            # re-prompted on every run with no visible reason.
+            typer.echo(
+                f"Warning: Could not save the OAuth token to the OS keyring ({e}). "
+                "You will be asked to sign in again on the next command. "
+                "Unlock or configure your keyring, or use --auth=adc.",
+                err=True,
+            )
+        else:
+            _remove_legacy_token()
 
     return creds
+
+
+def _remove_legacy_token() -> None:
+    """Removes the legacy token file if it exists."""
+    if not os.path.exists(LEGACY_TOKEN_PATH):
+        return
+    try:
+        os.remove(LEGACY_TOKEN_PATH)
+    except OSError as e:
+        logger.warning(f"Failed to remove legacy token {LEGACY_TOKEN_PATH}: {e}")
 
 
 def _get_adc_credentials() -> Credentials:
