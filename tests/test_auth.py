@@ -234,46 +234,6 @@ def test_get_credentials_refresh_failure_falls_back_to_remote_flow(mock_deps, mo
     assert res == mock_deps["session"].return_value
 
 
-def test_get_credentials_secret_service_locked_falls_back_to_remote_flow(
-    mock_deps, mocker
-):
-    """When Linux SecretService default collection is locked, fail fast and run
-    _run_remote_flow instead of blocking indefinitely on collection.unlock()."""
-    from keyring.backends import SecretService
-
-    mock_deps["exists"].side_effect = lambda path: path == "dummy_config.json"
-    mock_kr = MagicMock(spec=SecretService.Keyring)
-    mock_deps["keyring"].get_keyring.return_value = mock_kr
-
-    mock_collection = MagicMock()
-    mock_collection.is_locked.return_value = True
-    mocker.patch("secretstorage.dbus_init", return_value=MagicMock())
-    mocker.patch(
-        "secretstorage.get_default_collection", return_value=mock_collection
-    )
-
-    mock_flow = MagicMock()
-    mock_creds_new = MagicMock()
-    mock_creds_new.to_json.return_value = '{"token":"new"}'
-    mock_flow.authorization_url.return_value = ("https://auth.example/url", "state")
-    mock_flow.credentials = mock_creds_new
-    mock_deps["flow_cls"].from_client_config.return_value = mock_flow
-
-    mocker.patch("colab_cli.auth.input", create=True, return_value="pasted-code")
-
-    m_open = mock_open(read_data='{"web":{"client_id":"id"}}')
-    with patch("builtins.open", m_open):
-        res = get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
-
-    mock_collection.is_locked.assert_called()
-    mock_collection.unlock.assert_not_called()
-    mock_deps["keyring"].get_password.assert_not_called()
-    mock_deps["keyring"].set_password.assert_not_called()
-    mock_flow.fetch_token.assert_called_once_with(code="pasted-code")
-    mock_deps["session"].assert_called_once_with(mock_creds_new)
-    assert res == mock_deps["session"].return_value
-
-
 def test_get_credentials_keyring_timeout_falls_back_to_remote_flow(mock_deps, mocker):
     """When a keyring call hangs beyond the timeout, fall back to _run_remote_flow."""
     import threading

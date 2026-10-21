@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import enum
 import json
 import logging
@@ -24,7 +23,6 @@ from typing import Optional
 
 import google.auth
 import keyring
-from keyring.errors import KeyringLocked
 import typer
 from google.auth.transport import requests
 from google.auth.transport.requests import Request
@@ -57,35 +55,7 @@ PUBLIC_SCOPES = [
 
 KEYRING_SERVICE_NAME = "google-colab-cli"
 KEYRING_USERNAME = "oauth_token"
-KEYRING_TIMEOUT_SECONDS = 5.0
-
-
-def _raise_if_secret_service_locked() -> None:
-    """Fail fast if the Linux SecretService collection is locked.
-
-    ``keyring.backends.SecretService.Keyring.get_preferred_collection()`` calls
-    ``collection.unlock()`` with no timeout when the collection is locked, which
-    blocks indefinitely in terminal/remote/headless sessions waiting for a D-Bus
-    GUI prompt that the user cannot see.
-    """
-    try:
-        from keyring.backends import SecretService
-        import secretstorage
-    except ImportError:
-        return
-
-    kr = keyring.get_keyring()
-    if not isinstance(kr, SecretService.Keyring):
-        return
-
-    with contextlib.closing(secretstorage.dbus_init()) as bus:
-        preferred_collection = getattr(kr, "preferred_collection", None)
-        if preferred_collection:
-            collection = secretstorage.Collection(bus, preferred_collection)
-        else:
-            collection = secretstorage.get_default_collection(bus)
-        if collection.is_locked():
-            raise KeyringLocked("SecretService keyring collection is locked.")
+KEYRING_TIMEOUT_SECONDS = 30.0
 
 
 def _run_with_timeout(func, *args, timeout: float):
@@ -111,19 +81,22 @@ def _run_with_timeout(func, *args, timeout: float):
 
 
 def _get_token_from_keyring() -> Optional[str]:
-    def _load_keyring() -> Optional[str]:
-        _raise_if_secret_service_locked()
-        return keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_USERNAME)
-
-    return _run_with_timeout(_load_keyring, timeout=KEYRING_TIMEOUT_SECONDS)
+    return _run_with_timeout(
+        keyring.get_password,
+        KEYRING_SERVICE_NAME,
+        KEYRING_USERNAME,
+        timeout=KEYRING_TIMEOUT_SECONDS,
+    )
 
 
 def _save_token_to_keyring(token_json: str) -> None:
-    def _save_keyring() -> None:
-        _raise_if_secret_service_locked()
-        keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_USERNAME, token_json)
-
-    _run_with_timeout(_save_keyring, timeout=KEYRING_TIMEOUT_SECONDS)
+    _run_with_timeout(
+        keyring.set_password,
+        KEYRING_SERVICE_NAME,
+        KEYRING_USERNAME,
+        token_json,
+        timeout=KEYRING_TIMEOUT_SECONDS,
+    )
 
 # Remote copy-paste OAuth flow.
 #
