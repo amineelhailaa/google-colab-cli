@@ -438,7 +438,7 @@ def test_run_with_timeout_infers_operation_name():
     try:
         with pytest.raises(
             TimeoutError,
-            match="Operation 'custom_slow_operation' timed out after 0.0s.",
+            match="Operation 'custom_slow_operation' timed out after 0.0s",
         ):
             _run_with_timeout(custom_slow_operation, timeout=0.01)
     finally:
