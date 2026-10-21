@@ -12,15 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import enum
 import json
 import logging
 from importlib import resources
 import os
+import threading
 import warnings
 from typing import Optional
 
 import google.auth
+import keyring
+from keyring.errors import KeyringLocked
 import typer
 from google.auth.transport import requests
 from google.auth.transport.requests import Request
@@ -51,7 +55,75 @@ PUBLIC_SCOPES = [
 ]
 
 
-TOKEN_CONFIG_PATH = os.path.expanduser("~/.config/colab-cli/token.json")
+KEYRING_SERVICE_NAME = "google-colab-cli"
+KEYRING_USERNAME = "oauth_token"
+KEYRING_TIMEOUT_SECONDS = 5.0
+
+
+def _raise_if_secret_service_locked() -> None:
+    """Fail fast if the Linux SecretService collection is locked.
+
+    ``keyring.backends.SecretService.Keyring.get_preferred_collection()`` calls
+    ``collection.unlock()`` with no timeout when the collection is locked, which
+    blocks indefinitely in terminal/remote/headless sessions waiting for a D-Bus
+    GUI prompt that the user cannot see.
+    """
+    try:
+        from keyring.backends import SecretService
+        import secretstorage
+    except ImportError:
+        return
+
+    kr = keyring.get_keyring()
+    if not isinstance(kr, SecretService.Keyring):
+        return
+
+    with contextlib.closing(secretstorage.dbus_init()) as bus:
+        preferred_collection = getattr(kr, "preferred_collection", None)
+        if preferred_collection:
+            collection = secretstorage.Collection(bus, preferred_collection)
+        else:
+            collection = secretstorage.get_default_collection(bus)
+        if collection.is_locked():
+            raise KeyringLocked("SecretService keyring collection is locked.")
+
+
+def _run_with_timeout(func, *args, timeout: float):
+    """Run a blocking callable in a daemon thread and raise TimeoutError if it hangs."""
+    result = [None]
+    error: list[Optional[BaseException]] = [None]
+
+    def target() -> None:
+        try:
+            result[0] = func(*args)
+        except BaseException as exc:
+            error[0] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        op_name = getattr(func, "__name__", None) or repr(func)
+        raise TimeoutError(f"Operation '{op_name}' timed out after {timeout:.1f}s.")
+    if error[0] is not None:
+        raise error[0]
+    return result[0]
+
+
+def _get_token_from_keyring() -> Optional[str]:
+    def _load_keyring() -> Optional[str]:
+        _raise_if_secret_service_locked()
+        return keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_USERNAME)
+
+    return _run_with_timeout(_load_keyring, timeout=KEYRING_TIMEOUT_SECONDS)
+
+
+def _save_token_to_keyring(token_json: str) -> None:
+    def _save_keyring() -> None:
+        _raise_if_secret_service_locked()
+        keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_USERNAME, token_json)
+
+    _run_with_timeout(_save_keyring, timeout=KEYRING_TIMEOUT_SECONDS)
 
 # Remote copy-paste OAuth flow.
 #
@@ -119,16 +191,14 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
 
     creds = None
 
-    # Ensure config directory exists for the token file
-    os.makedirs(os.path.dirname(TOKEN_CONFIG_PATH), exist_ok=True)
-
-    if os.path.exists(TOKEN_CONFIG_PATH):
-        try:
-            creds = Credentials.from_authorized_user_file(
-                TOKEN_CONFIG_PATH, PUBLIC_SCOPES
+    try:
+        token_json = _get_token_from_keyring()
+        if token_json:
+            creds = Credentials.from_authorized_user_info(
+                json.loads(token_json), PUBLIC_SCOPES
             )
-        except Exception as e:
-            logger.warning(f"Failed to load token from {TOKEN_CONFIG_PATH}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to load token from keyring: {e}")
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -143,10 +213,9 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
 
         # Save the credentials for the next run
         try:
-            with open(TOKEN_CONFIG_PATH, "w") as token_file:
-                token_file.write(creds.to_json())
+            _save_token_to_keyring(creds.to_json())
         except Exception as e:
-            logger.error(f"Failed to save token to {TOKEN_CONFIG_PATH}: {e}")
+            logger.warning(f"Failed to save token to keyring: {e}")
 
     return creds
 
