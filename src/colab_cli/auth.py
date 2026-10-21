@@ -78,7 +78,7 @@ def _run_with_timeout(func, *args, timeout: float):
     thread.join(timeout=timeout)
     if thread.is_alive():
         op_name = getattr(func, "__name__", None) or repr(func)
-        raise TimeoutError(f"Operation '{op_name}' timed out after {timeout:.1f}s.")
+        raise TimeoutError(f"Operation '{op_name}' timed out after {timeout:.1f}s")
     if error[0] is not None:
         raise error[0]
     return result[0]
