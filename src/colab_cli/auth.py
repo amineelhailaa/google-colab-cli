@@ -64,24 +64,28 @@ LEGACY_TOKEN_PATH = os.path.expanduser("~/.config/colab-cli/token.json")
 
 def _run_with_timeout(func, *args, timeout: float):
     """Run a blocking callable in a daemon thread and raise TimeoutError if it hangs."""
-    result = [None]
-    error: list[Optional[BaseException]] = [None]
+    result = None
+    error: Optional[BaseException] = None
 
     def target() -> None:
+        nonlocal result, error
         try:
-            result[0] = func(*args)
+            result = func(*args)
         except BaseException as exc:
-            error[0] = exc
+            error = exc
 
     thread = threading.Thread(target=target, daemon=True)
     thread.start()
     thread.join(timeout=timeout)
     if thread.is_alive():
+        # Python's threading.Thread has no API to terminate a thread blocked in
+        # an OS/D-Bus call; daemon=True ensures it won't block interpreter exit
+        # and is reaped by the OS when the CLI process finishes.
         op_name = getattr(func, "__name__", None) or repr(func)
         raise TimeoutError(f"Operation '{op_name}' timed out after {timeout:.1f}s")
-    if error[0] is not None:
-        raise error[0]
-    return result[0]
+    if error is not None:
+        raise error
+    return result
 
 
 def _get_token_from_keyring() -> Optional[str]:
