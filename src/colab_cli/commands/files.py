@@ -21,6 +21,7 @@ from typing import Optional
 from typing_extensions import Annotated
 
 from colab_cli.contents import ContentsClient
+from colab_cli.state import SessionState
 
 
 def ls(
@@ -112,12 +113,64 @@ def download(
     local_path: Annotated[
         str, typer.Argument(help="Local path to save the file")
     ] = ...,
+    active_runtime: Annotated[
+        bool,
+        typer.Option(
+            "--active-runtime",
+            help="Register an existing active runtime before downloading; -s sets its local name (default: active).",
+        ),
+    ] = False,
+    endpoint: Annotated[
+        Optional[str],
+        typer.Option(
+            "--endpoint",
+            help="Runtime endpoint to select with --active-runtime when several are active.",
+        ),
+    ] = None,
 ):
     """Download a file from a session"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
-    s = state.get_session(name)
+    if endpoint and not active_runtime:
+        raise typer.BadParameter("--endpoint requires --active-runtime")
+    if active_runtime:
+        runtimes = state.client.list_assignments()
+        if endpoint:
+            runtimes = [r for r in runtimes if r.endpoint == endpoint]
+        if not runtimes:
+            typer.echo(
+                "[colab] No matching active runtime. Connect in PyCharm or Colab first."
+            )
+            raise typer.Exit(1)
+        if len(runtimes) > 1:
+            typer.echo("[colab] Multiple active runtimes; select one with --endpoint:")
+            for runtime in runtimes:
+                typer.echo(f"  {runtime.endpoint}")
+            raise typer.Exit(1)
+        runtime = runtimes[0]
+        name = session or "active"
+        proxy = runtime.runtime_proxy_info
+        existing = state.store.get(name)
+        # Preserve cached kernel metadata when refreshing the same runtime.
+        if isinstance(existing, SessionState) and existing.endpoint == runtime.endpoint:
+            s = existing
+        else:
+            s = SessionState(
+                name=name, endpoint=runtime.endpoint, token=proxy.token, url=proxy.url
+            )
+        s.token = proxy.token
+        s.url = proxy.url
+        s.token_expires_at = proxy.expires_at()
+        s.variant = runtime.variant.name
+        s.accelerator = runtime.accelerator.value
+        s.machine_shape = runtime.machine_shape.name
+        state.store.add(s)
+        typer.echo(
+            f"[colab] Registered active runtime '{runtime.endpoint}' as '{name}'."
+        )
+    else:
+        name = state.resolve_session(session)
+        s = state.get_session(name)
     contents = ContentsClient(s)
     try:
         contents.download(remote_path, local_path)

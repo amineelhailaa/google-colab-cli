@@ -1,3 +1,7 @@
+---
+log:
+  2026-10-25: Added download --active-runtime to register existing IDE or browser runtimes, with explicit endpoint selection for multiple runtimes.
+---
 # Design: File Management (`ls`, `rm`, `upload`, `download`, `edit`)
 
 ## Overview
@@ -32,6 +36,18 @@ File management on the Colab VM will be implemented using the Jupyter Contents A
 - **API**: `GET /api/contents/<remote_path>?content=1` (as seen in HAR).
 - **Response**: JSON with `content` field.
 - **Handling**: Decodes content based on `format` (text or base64) and saves it locally.
+
+#### Existing active runtimes
+
+`colab download --active-runtime [-s NAME] [--endpoint ENDPOINT] REMOTE LOCAL`
+queries the existing assignments endpoint and persists the selected runtime's
+proxy URL, token, expiry, hardware, and endpoint in the local session store before
+using the normal download implementation. The default alias is `active`.
+No assignment is created or stopped. Zero matches fail; multiple matches list
+endpoints and require explicit selection. `--endpoint` requires `--active-runtime`.
+An explicitly requested alias is rebound if the runtime changes; kernel metadata
+is retained only when the endpoint matches. Normal downloads without the new flag
+retain the existing session-resolution behavior.
 
 ### 4. Deleting Files (`colab rm`)
 - **API**: `DELETE /api/contents/<remote_path>`.

@@ -93,6 +93,22 @@ Run `colab <command> --help` to view specific options, defaults, and detailed he
 | `colab rm [-s NAME] PATH` | Delete a remote file on the VM filesystem |
 | `colab edit [-s NAME] PATH` | Edit a remote file in-place using your local `$EDITOR` |
 
+### Download from an existing IDE runtime
+
+For a runtime already started in PyCharm, the Colab browser, or another client:
+
+```bash
+colab download --active-runtime -s diagnostic /content/best_model.keras ./best_model.keras
+```
+
+This registers the currently active runtime as `diagnostic` and downloads the file
+in one command. No new VM is created. Omit `-s` to use the local name `active`.
+Repeat the same command after reconnecting to a new runtime; the alias is refreshed.
+If multiple runtimes are active, run `colab sessions` and add
+`--endpoint ENDPOINT` to choose one explicitly. The CLI cannot infer which IDE
+owns a runtime. After registration, ordinary `colab download -s diagnostic ...`
+also works. Authentication uses the existing CLI credentials and global options.
+
 ### Automation & Utilities
 | Command | Description |
 | --- | --- |

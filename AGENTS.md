@@ -91,3 +91,6 @@ As an AI agent operating via non-interactive shell tools (`run_shell_command`), 
   - **Interactive (TTY) `colab repl` / `colab console`**: When stdin is a real terminal these commands drop into interactive raw-TTY modes that require real-time keystroke streaming. My shell tools cannot support this. (Piped stdin is fine — see above.)
 
 Whenever working on interactive commands, I must build the core logic, write mock tests, and explicitly ask the user to run the live test in their terminal to verify success.
+
+## IDE runtime workflow
+- When adding download support for IDE-created Colab runtimes, provide a flag on the original `colab download` command. Do not substitute a standalone wrapper or require repeated Python registration snippets. Prefer `--active-runtime` because assignment metadata does not identify the originating IDE.
